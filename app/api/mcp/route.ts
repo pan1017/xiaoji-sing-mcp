@@ -690,6 +690,119 @@ server.registerTool(
   }
 );
 
+
+
+  
+server.registerTool(
+  "check_netease_audio",
+  {
+    title: "检查网易云音频",
+    description:
+      "检查指定网易云歌曲的音频地址是否可访问，并检查歌曲时长和音频响应信息。仅用于有权使用的音源。",
+    inputSchema: {
+      song_id: z.string().min(1).describe("网易云歌曲ID"),
+    },
+  },
+  async ({ song_id }) => {
+    try {
+      const detailUrl =
+        `https://music.163.com/api/song/detail/?id=${encodeURIComponent(song_id)}&ids=%5B${encodeURIComponent(song_id)}%5D`;
+
+      const detailResponse = await fetch(detailUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Referer: "https://music.163.com/",
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!detailResponse.ok) {
+        throw new Error("无法获取歌曲详情");
+      }
+
+      const detail = await detailResponse.json();
+      const song = detail.songs?.[0];
+
+      if (!song) {
+        throw new Error("没有找到对应歌曲");
+      }
+
+      const durationMs = song.duration ?? song.dt ?? 0;
+      const durationSeconds = Math.floor(durationMs / 1000);
+
+      const audioUrl =
+        `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(song_id)}.mp3`;
+
+      const audioResponse = await fetch(audioUrl, {
+        method: "HEAD",
+        redirect: "follow",
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Referer: "https://music.163.com/",
+        },
+        signal: AbortSignal.timeout(20000),
+      });
+
+      const contentLength = Number(
+        audioResponse.headers.get("content-length") ?? 0
+      );
+
+      const contentType =
+        audioResponse.headers.get("content-type") ?? "unknown";
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                song_name: song.name,
+                artists: (song.artists ?? song.ar ?? []).map(
+                  (artist: any) => artist.name
+                ),
+                duration_seconds: durationSeconds,
+                duration_minutes: Number(
+                  (durationSeconds / 60).toFixed(2)
+                ),
+                audio_accessible: audioResponse.ok,
+                http_status: audioResponse.status,
+                content_type: contentType,
+                file_size_bytes: contentLength || null,
+                file_size_mb: contentLength
+                  ? Number(
+                      (contentLength / 1024 / 1024).toFixed(2)
+                    )
+                  : null,
+                duration_under_5_minutes:
+                  durationSeconds <= 300,
+                note:
+                  "HEAD 请求结果仅用于初步检查，不能保证实际下载或上传一定成功。请确保拥有音源使用授权。",
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `音频检查失败：${
+              error instanceof Error
+                ? error.message
+                : String(error)
+            }`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
   
   server.registerTool(
     "check_song_status",
