@@ -591,6 +591,105 @@ server.registerTool(
 );
 
 
+server.registerTool(
+  "get_netease_song_info",
+  {
+    title: "获取网易云歌曲信息",
+    description:
+      "根据网易云歌曲ID获取歌曲详情、歌词和音频地址，供后续有授权的素材处理流程使用。",
+    inputSchema: {
+      song_id: z.string().min(1).describe("网易云歌曲ID"),
+    },
+  },
+  async ({ song_id }) => {
+    try {
+      const headers = {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        Referer: "https://music.163.com/",
+      };
+
+      const [detailResponse, lyricResponse] =
+        await Promise.all([
+          fetch(
+            `https://music.163.com/api/song/detail/?id=${encodeURIComponent(song_id)}&ids=%5B${encodeURIComponent(song_id)}%5D`,
+            { headers, signal: AbortSignal.timeout(15000) }
+          ),
+          fetch(
+            `https://music.163.com/api/song/lyric?id=${encodeURIComponent(song_id)}&lv=1&tv=1`,
+            { headers, signal: AbortSignal.timeout(15000) }
+          ),
+        ]);
+
+      if (!detailResponse.ok || !lyricResponse.ok) {
+        throw new Error("网易云歌曲信息请求失败");
+      }
+
+      const [detail, lyricData] = await Promise.all([
+        detailResponse.json(),
+        lyricResponse.json(),
+      ]);
+
+      const song =
+        detail.songs?.[0] ??
+        detail.songs?.songs?.[0] ??
+        null;
+
+      if (!song) {
+        throw new Error("没有获取到歌曲详情，请检查歌曲ID");
+      }
+
+      const lyric = lyricData.lrc?.lyric ?? "";
+      const artists = (song.artists ?? song.ar ?? []).map(
+        (artist: any) => artist.name
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                song: {
+                  song_id: String(song.id),
+                  name: song.name,
+                  artists,
+                  album: song.album?.name ?? song.al?.name ?? "",
+                  duration_ms: song.duration ?? song.dt ?? 0,
+                  duration_seconds: Math.floor(
+                    (song.duration ?? song.dt ?? 0) / 1000
+                  ),
+                },
+                lyrics_available: Boolean(lyric),
+                lyrics: lyric,
+                audio_url:
+                  `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(song_id)}.mp3`,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `获取网易云歌曲信息失败：${
+              error instanceof Error
+                ? error.message
+                : String(error)
+            }`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
   
   server.registerTool(
     "check_song_status",
