@@ -3,7 +3,7 @@ import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 
 // ==========================================
-// 角色与海绵音乐克隆音色的对应关系
+// 角色音色映射
 // ==========================================
 
 const VOICE_MAP: Record<string, string> = {
@@ -12,7 +12,7 @@ const VOICE_MAP: Record<string, string> = {
 };
 
 // ==========================================
-// 海绵音乐接口请求
+// 通用海绵音乐请求
 // ==========================================
 
 async function haimianRequest(
@@ -23,9 +23,7 @@ async function haimianRequest(
   const cookie = process.env.HAIMIAN_COOKIE;
 
   if (!cookie) {
-    throw new Error(
-      "缺少 HAIMIAN_COOKIE 环境变量，请检查 Vercel 配置。"
-    );
+    throw new Error("缺少 HAIMIAN_COOKIE 环境变量");
   }
 
   const response = await fetch(
@@ -43,34 +41,30 @@ async function haimianRequest(
     }
   );
 
-  const responseText = await response.text();
+  const text = await response.text();
 
   if (!response.ok) {
     throw new Error(
-      `海绵音乐接口请求失败，HTTP ${response.status}：${responseText.slice(0, 1000)}`
+      `海绵音乐 HTTP ${response.status}: ${text.slice(0, 800)}`
     );
   }
 
   let result: any;
 
   try {
-    result = JSON.parse(responseText);
+    result = JSON.parse(text);
   } catch {
-    throw new Error(
-      `海绵音乐返回的不是有效 JSON：${responseText.slice(0, 1000)}`
-    );
+    throw new Error(`海绵音乐返回无效 JSON: ${text.slice(0, 500)}`);
   }
 
   if (
     typeof result?.status_code === "number" &&
     result.status_code !== 0
   ) {
-    const message =
-      result?.status_info?.status_msg ||
-      "海绵音乐返回业务异常";
-
     throw new Error(
-      `海绵音乐业务错误：${message}；状态码：${result.status_code}；log_id：${result?.status_info?.log_id || result?.log_id || "无"}`
+      `海绵音乐业务错误：${result?.status_msg || "未知错误"}；` +
+      `状态码：${result.status_code}；` +
+      `log_id：${result?.status_info?.log_id || "无"}`
     );
   }
 
@@ -78,42 +72,109 @@ async function haimianRequest(
 }
 
 // ==========================================
-// MCP 工具统一错误返回
+// 获取海绵音乐临时上传凭证
+// ==========================================
+
+async function getHaimianAuth() {
+  const officialUid = process.env.HAIMIAN_OFFICIAL_UID;
+
+  if (!officialUid) {
+    throw new Error("缺少 HAIMIAN_OFFICIAL_UID 环境变量");
+  }
+
+  const params = new URLSearchParams({
+    app_name: "goat",
+    app_name_cn: "海绵音乐",
+    aid: "588628",
+    app_id: "588628",
+    region: "CN",
+    language: "zh",
+    app_version: "1.0.0.1702",
+    channel: "online",
+    device_platform: "web",
+    official_uid: officialUid,
+  });
+
+  const response = await fetch(
+    `https://www.haimian.com/jd/api/v1/video/get_auth_token?${params}`,
+    {
+      method: "POST",
+      headers: {
+        Cookie: process.env.HAIMIAN_COOKIE || "",
+        "Content-Type": "application/json",
+        Origin: "https://www.haimian.com",
+        Referer: "https://www.haimian.com/create",
+      },
+      cache: "no-store",
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `获取上传凭证失败：HTTP ${response.status}`
+    );
+  }
+
+  const result: any = await response.json();
+
+  if (result.status_code !== 0 || !result.data) {
+    throw new Error(
+      `获取上传凭证失败：${result.status_msg || "未知错误"}`
+    );
+  }
+
+  const auth = result.data;
+
+  if (
+    !auth.auth_token ||
+    !auth.access_key ||
+    !auth.secret_key ||
+    !auth.expired_time
+  ) {
+    throw new Error("临时凭证字段不完整");
+  }
+
+  if (new Date(auth.expired_time).getTime() <= Date.now()) {
+    throw new Error("获取到的临时凭证已经过期");
+  }
+
+  return {
+    auth_token: auth.auth_token,
+    access_key: auth.access_key,
+    secret_key: auth.secret_key,
+    expired_time: auth.expired_time,
+  };
+}
+
+// ==========================================
+// 错误处理
 // ==========================================
 
 function errorResult(error: unknown) {
-  const message =
-    error instanceof Error
-      ? error.message
-      : "发生未知错误";
-
   return {
-    content: [
-      {
-        type: "text" as const,
-        text: `操作失败：${message}`,
-      },
-    ],
+    content: [{
+      type: "text" as const,
+      text: `操作失败：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    }],
     isError: true,
   };
 }
 
 // ==========================================
-// 注册 MCP 工具
+// MCP 工具
 // ==========================================
 
 const handler = createMcpHandler((server) => {
 
-  // ----------------------------------------
-  // 1. 测试 MCP 连接
-  // ----------------------------------------
+  // 1. 测试连接
 
   server.registerTool(
     "test_connection",
     {
       title: "测试唱歌服务连接",
-      description:
-        "测试小手机与唱歌 MCP 服务的连接。",
+      description: "测试小手机与唱歌 MCP 服务的连接。",
       inputSchema: z.object({
         message: z.string().optional(),
       }),
@@ -121,23 +182,18 @@ const handler = createMcpHandler((server) => {
     async ({ message }) => ({
       content: [{
         type: "text",
-        text:
-          "小机唱歌服务连接成功！\n收到消息：" +
-          (message || "无"),
+        text: `小机唱歌服务连接成功！\n收到消息：${message || "无"}`,
       }],
     })
   );
 
-  // ----------------------------------------
-  // 2. 查询我的音色
-  // ----------------------------------------
+  // 2. 查询音色
 
   server.registerTool(
     "list_my_voices",
     {
       title: "查询我的音色",
-      description:
-        "查询用户在海绵音乐中已有的音色，获取可用于歌曲生成的 voice_id。",
+      description: "查询海绵音乐中已有的音色。",
       inputSchema: z.object({}),
     },
     async () => {
@@ -158,16 +214,13 @@ const handler = createMcpHandler((server) => {
     }
   );
 
-  // ----------------------------------------
-  // 3. 查询已经上传的原曲
-  // ----------------------------------------
+  // 3. 查询已上传素材
 
   server.registerTool(
     "list_uploaded_songs",
     {
       title: "查询已上传原曲",
-      description:
-        "查询用户在海绵音乐中上传的原曲，获取翻唱任务需要的素材 ID。",
+      description: "查询海绵音乐中已经上传的原曲素材。",
       inputSchema: z.object({}),
     },
     async () => {
@@ -188,186 +241,118 @@ const handler = createMcpHandler((server) => {
     }
   );
 
-  // ----------------------------------------
-  // 4. 提交歌曲生成任务
-  // 当前使用已验证的原创请求参数
-  // ----------------------------------------
+  // 4. 获取临时上传凭证
+  // 不向模型返回密钥，只返回状态和有效期。
 
   server.registerTool(
-    "start_song_generation",
+    "test_haimian_auth",
     {
-      title: "开始生成原创歌曲",
+      title: "测试海绵上传认证",
       description:
-        "调用海绵音乐生成原创歌曲。" +
-        "如果当前对话角色是 Graves，传入 character='graves'；" +
-        "如果当前对话角色是 Krueger，传入 character='krueger'。" +
-        "服务端会自动匹配对应的数字 voice_id。" +
-        "prompt 用于描述歌曲风格和演唱要求。" +
-        "当前版本支持已验证的原创歌曲请求。" +
-        "提交成功后返回任务 ID，可调用 check_song_status 查询进度。",
-      inputSchema: z.object({
-        prompt: z.string().min(1).describe(
-          "歌曲风格和演唱要求，例如：国风，民谣，温柔男声"
-        ),
-
-        character: z.enum([
-          "graves",
-          "krueger",
-        ]).optional().describe(
-          "当前演唱角色。Graves 填 graves，Krueger 填 krueger"
-        ),
-
-        voice_id: z.string().min(1).optional().describe(
-          "手动指定数字音色 ID。仅在不使用 Graves 或 Krueger 角色映射时填写"
-        ),
-      }),
+        "获取海绵音乐临时上传凭证，并检查凭证是否有效。不会向对话输出密钥。",
+      inputSchema: z.object({}),
     },
-
-    async ({
-      prompt,
-      character,
-      voice_id,
-    }) => {
+    async () => {
       try {
-        const selectedVoiceId = character
-          ? VOICE_MAP[character]
-          : voice_id;
-
-        if (!selectedVoiceId) {
-          return {
-            content: [{
-              type: "text",
-              text:
-                "缺少音色信息。请指定 character 为 graves 或 krueger，" +
-                "或者手动提供数字 voice_id。",
-            }],
-            isError: true,
-          };
-        }
-
-        // 严格保留已经验证成功的原创请求参数
-        const requestBody: Record<string, unknown> = {
-          prompt,
-          is_original_prompt: true,
-          voice_id: Number(selectedVoiceId),
-          task_type: 1,
-          biz_type: 0,
-          batch_size: 2,
-        };
-
-        const result: any = await haimianRequest(
-          "/jd/api/v1/generate/music",
-          "POST",
-          requestBody
-        );
-
-        const tasks = Array.isArray(result?.data?.tasks)
-          ? result.data.tasks
-          : [];
-
-        const normalizedTasks = tasks.length > 0
-          ? tasks
-          : (() => {
-              const oldTaskId =
-                result?.data?.task_id ??
-                result?.data?.taskId ??
-                result?.task_id ??
-                result?.taskId;
-
-              return oldTaskId
-                ? [{ task_id: oldTaskId }]
-                : [];
-            })();
-
-        if (normalizedTasks.length === 0) {
-          return {
-            content: [{
-              type: "text",
-              text:
-                "海绵音乐已返回成功状态，但没有找到任务 ID。\n" +
-                "接口响应：" +
-                JSON.stringify(result, null, 2),
-            }],
-            isError: true,
-          };
-        }
-
-        const taskDetails = normalizedTasks.map(
-          (task: any, index: number) => ({
-            index: index + 1,
-            task_id: task.task_id,
-            song_id: task.song_id ?? null,
-            batch_id: task.batch_id ?? null,
-          })
-        );
-
-        const taskText = taskDetails
-          .map((task: any) =>
-            `第 ${task.index} 首：\n` +
-            `任务 ID：${task.task_id}\n` +
-            `歌曲 ID：${task.song_id ?? "暂无"}`
-          )
-          .join("\n\n");
+        const auth = await getHaimianAuth();
 
         return {
           content: [{
             type: "text",
-            text:
-              "歌曲生成任务已成功提交！\n\n" +
-              `演唱角色：${character || "手动指定音色"}\n` +
-              `使用数字音色 ID：${selectedVoiceId}\n` +
-              `成功创建任务数：${taskDetails.length}\n\n` +
-              taskText +
-              "\n\n请保存任务 ID，稍后调用 check_song_status 查询歌曲进度。",
+            text: JSON.stringify({
+              success: true,
+              message: "海绵音乐临时凭证获取成功",
+              expired_time: auth.expired_time,
+              credentials_hidden: true,
+            }, null, 2),
           }],
         };
-
       } catch (error) {
         return errorResult(error);
       }
     }
   );
 
-  // ----------------------------------------
-  // 5. 提交歌曲翻唱任务
-  // 使用已经抓包验证成功的请求参数
-  // ----------------------------------------
+  // 5. 原创歌曲生成
+
+  server.registerTool(
+    "start_song_generation",
+    {
+      title: "开始生成原创歌曲",
+      description:
+        "生成原创歌曲。Graves 使用 graves，Krueger 使用 krueger。",
+      inputSchema: z.object({
+        prompt: z.string().min(1),
+        character: z.enum(["graves", "krueger"]).optional(),
+        voice_id: z.string().min(1).optional(),
+      }),
+    },
+    async ({ prompt, character, voice_id }) => {
+      try {
+        const selectedVoiceId = character
+          ? VOICE_MAP[character]
+          : voice_id;
+
+        if (!selectedVoiceId) {
+          throw new Error("请指定 character 或 voice_id");
+        }
+
+        const result: any = await haimianRequest(
+          "/jd/api/v1/generate/music",
+          "POST",
+          {
+            prompt,
+            is_original_prompt: true,
+            voice_id: Number(selectedVoiceId),
+            task_type: 1,
+            biz_type: 0,
+            batch_size: 2,
+          }
+        );
+
+        const tasks = result?.data?.tasks || [];
+
+        if (!tasks.length) {
+          throw new Error(
+            `没有获取到任务 ID：${JSON.stringify(result)}`
+          );
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              "原创歌曲任务提交成功！\n" +
+              `角色：${character || "自定义音色"}\n` +
+              `音色 ID：${selectedVoiceId}\n\n` +
+              tasks.map((task: any, index: number) =>
+                `第 ${index + 1} 首：\n` +
+                `任务 ID：${task.task_id}\n` +
+                `歌曲 ID：${task.song_id ?? "暂无"}`
+              ).join("\n\n"),
+          }],
+        };
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // 6. 歌曲翻唱
 
   server.registerTool(
     "start_song_cover",
     {
       title: "开始翻唱歌曲",
       description:
-        "使用海绵音乐中已经上传的原曲素材进行翻唱。" +
-        "需要提供原曲素材 item_id、歌词和风格描述。" +
-        "Graves 角色传入 character='graves'；" +
-        "Krueger 角色传入 character='krueger'。" +
-        "服务端自动匹配对应数字 voice_id。" +
-        "提交成功后返回 task_id，可调用 check_song_status 查询进度。",
+        "使用海绵音乐中已有的素材进行翻唱。需要素材 ID、歌词和角色。",
       inputSchema: z.object({
-        source_item_id: z.string().min(1).describe(
-          "海绵音乐已上传原曲素材的 item_id"
-        ),
-
-        lyrics: z.string().min(1).describe(
-          "歌曲歌词，按段落换行"
-        ),
-
-        prompt: z.string().min(1).default(
-          "严格参考原曲进行翻唱"
-        ).describe(
-          "演唱风格和要求"
-        ),
-
-        character: z.enum([
-          "graves",
-          "krueger",
-        ]).describe(
-          "演唱角色：Graves 或 Krueger"
-        ),
+        source_item_id: z.string().min(1),
+        lyrics: z.string().min(1),
+        prompt: z.string().min(1).default("严格参考原曲进行翻唱"),
+        character: z.enum(["graves", "krueger"]),
       }),
     },
-
     async ({
       source_item_id,
       lyrics,
@@ -377,445 +362,309 @@ const handler = createMcpHandler((server) => {
       try {
         const selectedVoiceId = VOICE_MAP[character];
 
-        // 严格按照网页端已经成功的翻唱请求构造请求体
-        const requestBody: Record<string, unknown> = {
-          prompt,
-          lyrics,
-          is_original_prompt: true,
-          voice_id: Number(selectedVoiceId),
-          task_type: 1,
-          source_item: [
-            {
+        const result: any = await haimianRequest(
+          "/jd/api/v1/generate/music",
+          "POST",
+          {
+            prompt,
+            lyrics,
+            is_original_prompt: true,
+            voice_id: Number(selectedVoiceId),
+            task_type: 1,
+            source_item: [{
               item: {
                 item_id: source_item_id,
                 item_type: 0,
               },
-            },
-          ],
-          biz_type: 7,
-          batch_size: 1,
-        };
-
-        const result: any = await haimianRequest(
-          "/jd/api/v1/generate/music",
-          "POST",
-          requestBody
+            }],
+            biz_type: 7,
+            batch_size: 1,
+          }
         );
 
-        const tasks = Array.isArray(result?.data?.tasks)
-          ? result.data.tasks
-          : [];
+        const tasks = result?.data?.tasks || [];
 
-        if (tasks.length === 0 || !tasks[0]?.task_id) {
-          return {
-            content: [{
-              type: "text",
-              text:
-                "翻唱请求已返回，但没有找到任务 ID。\n" +
-                JSON.stringify(result, null, 2),
-            }],
-            isError: true,
-          };
+        if (!tasks.length || !tasks[0]?.task_id) {
+          throw new Error(
+            `没有获取到翻唱任务 ID：${JSON.stringify(result)}`
+          );
         }
-
-        const taskText = tasks.map(
-          (task: any, index: number) =>
-            `第 ${index + 1} 首：\n` +
-            `任务 ID：${task.task_id}\n` +
-            `歌曲 ID：${task.song_id ?? "暂无"}\n` +
-            `批次 ID：${task.batch_id ?? "暂无"}`
-        ).join("\n\n");
 
         return {
           content: [{
             type: "text",
             text:
-              "翻唱任务已成功提交！\n\n" +
-              `演唱角色：${character}\n` +
+              "翻唱任务提交成功！\n" +
+              `角色：${character}\n` +
               `音色 ID：${selectedVoiceId}\n` +
-              `原曲素材 ID：${source_item_id}\n\n` +
-              taskText +
-              "\n\n请稍后调用 check_song_status 查询生成进度。",
+              `素材 ID：${source_item_id}\n` +
+              tasks.map((task: any) =>
+                `任务 ID：${task.task_id}\n歌曲 ID：${task.song_id ?? "暂无"}`
+              ).join("\n"),
           }],
         };
-
       } catch (error) {
         return errorResult(error);
       }
     }
   );
 
-  // ----------------------------------------
-  // 6. 查询歌曲生成进度
-  // ----------------------------------------
+  // 7. 网易云搜索
 
-server.registerTool(
-  "search_netease_song",
-  {
-    title: "搜索网易云歌曲",
-    description:
-      "根据歌曲名称和歌手名称搜索网易云音乐，返回歌曲ID、歌名、歌手、专辑和时长。优先核对歌曲名称和歌手，排除伴奏及明显不匹配的结果。",
-    inputSchema: {
-      song_name: z.string().min(1).describe("歌曲名称"),
-      artist_name: z.string().min(1).describe("歌手名称"),
+  server.registerTool(
+    "search_netease_song",
+    {
+      title: "搜索网易云歌曲",
+      description: "按歌名和歌手搜索网易云歌曲。",
+      inputSchema: z.object({
+        song_name: z.string().min(1),
+        artist_name: z.string().min(1),
+      }),
     },
-  },
-  async ({ song_name, artist_name }) => {
-    try {
-      const keyword = `${song_name} ${artist_name}`;
-
-      const url =
-        "https://music.163.com/api/search/get/?" +
-        new URLSearchParams({
-          s: keyword,
+    async ({ song_name, artist_name }) => {
+      try {
+        const params = new URLSearchParams({
+          s: `${song_name} ${artist_name}`,
           type: "1",
           limit: "10",
           offset: "0",
-        }).toString();
+        });
 
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-          Referer: "https://music.163.com/",
-        },
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (!response.ok) {
-        throw new Error(
-          `网易云搜索请求失败，HTTP ${response.status}`
-        );
-      }
-
-      const result = await response.json();
-
-      if (result.code !== 200) {
-        throw new Error(
-          `网易云返回异常状态：${result.code}`
-        );
-      }
-
-      const songs = result.result?.songs ?? [];
-
-      if (songs.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "没有搜索到相关歌曲，请检查歌名和歌手名称。",
+        const response = await fetch(
+          `https://music.163.com/api/search/get/?${params}`,
+          {
+            headers: {
+              "User-Agent": "Mozilla/5.0",
+              Referer: "https://music.163.com/",
             },
-          ],
-        };
-      }
-
-      const normalize = (value: string) =>
-        value.toLowerCase().replace(/\s+/g, "").trim();
-
-      const targetSong = normalize(song_name);
-      const targetArtist = normalize(artist_name);
-
-      const candidates = songs.map((song: any) => {
-        const artists = (song.artists ?? []).map(
-          (artist: any) => artist.name
+            signal: AbortSignal.timeout(15000),
+          }
         );
 
-        const songTitle = normalize(song.name);
-        const artistNames = artists.map(normalize);
+        if (!response.ok) {
+          throw new Error(`网易云 HTTP ${response.status}`);
+        }
 
-        const exactTitle = songTitle === targetSong;
-        const exactArtist = artistNames.includes(targetArtist);
+        const result: any = await response.json();
+        const songs = result.result?.songs || [];
 
-        const isInstrumental =
-          song.name.includes("伴奏") ||
-          song.name.includes("纯音乐");
+        const normalize = (value: string) =>
+          value.toLowerCase().replace(/\s+/g, "").trim();
+
+        const candidates = songs.map((song: any) => {
+          const artists = (song.artists || []).map(
+            (artist: any) => artist.name
+          );
+
+          const exactTitle =
+            normalize(song.name) === normalize(song_name);
+
+          const exactArtist = artists.some(
+            (artist: string) =>
+              normalize(artist) === normalize(artist_name)
+          );
+
+          const instrumental =
+            /伴奏|纯音乐/.test(song.name);
+
+          return {
+            song_id: song.id,
+            song_name: song.name,
+            artists,
+            album: song.album?.name || "",
+            duration_ms: song.duration || 0,
+            exact_title: exactTitle,
+            exact_artist: exactArtist,
+            instrumental,
+            matched: exactTitle && exactArtist && !instrumental,
+          };
+        });
 
         return {
-          song_id: song.id,
-          song_name: song.name,
-          artists,
-          album: song.album?.name ?? "",
-          duration_ms: song.duration ?? 0,
-          duration:
-            `${Math.floor((song.duration ?? 0) / 60000)}分` +
-            `${Math.floor(((song.duration ?? 0) % 60000) / 1000)}秒`,
-          exact_title: exactTitle,
-          exact_artist: exactArtist,
-          instrumental: isInstrumental,
-          matched:
-            exactTitle && exactArtist && !isInstrumental,
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              best_match: candidates.find((item: any) => item.matched) || null,
+              songs: candidates,
+            }, null, 2),
+          }],
         };
-      });
-
-      candidates.sort((a: any, b: any) => {
-        return Number(b.matched) - Number(a.matched);
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                search_keyword: keyword,
-                total: candidates.length,
-                best_match:
-                  candidates.find((song: any) => song.matched) ??
-                  null,
-                songs: candidates,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `网易云歌曲搜索失败：${
-              error instanceof Error
-                ? error.message
-                : String(error)
-            }`,
-          },
-        ],
-        isError: true,
-      };
+      } catch (error) {
+        return errorResult(error);
+      }
     }
-  }
-);
+  );
 
+  // 8. 网易云歌曲详情和歌词
 
-server.registerTool(
-  "get_netease_song_info",
-  {
-    title: "获取网易云歌曲信息",
-    description:
-      "根据网易云歌曲ID获取歌曲详情、歌词和音频地址，供后续有授权的素材处理流程使用。",
-    inputSchema: {
-      song_id: z.string().min(1).describe("网易云歌曲ID"),
+  server.registerTool(
+    "get_netease_song_info",
+    {
+      title: "获取网易云歌曲信息",
+      description:
+        "查询歌曲详情、歌词可用性和音频地址。请确保音频使用具有授权。",
+      inputSchema: z.object({
+        song_id: z.string().min(1),
+      }),
     },
-  },
-  async ({ song_id }) => {
-    try {
-      const headers = {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        Referer: "https://music.163.com/",
-      };
+    async ({ song_id }) => {
+      try {
+        const headers = {
+          "User-Agent": "Mozilla/5.0",
+          Referer: "https://music.163.com/",
+        };
 
-      const [detailResponse, lyricResponse] =
-        await Promise.all([
+        const [detailResponse, lyricResponse] = await Promise.all([
           fetch(
-            `https://music.163.com/api/song/detail/?id=${encodeURIComponent(song_id)}&ids=%5B${encodeURIComponent(song_id)}%5D`,
+            `https://music.163.com/api/song/detail/?id=${song_id}&ids=%5B${song_id}%5D`,
             { headers, signal: AbortSignal.timeout(15000) }
           ),
           fetch(
-            `https://music.163.com/api/song/lyric?id=${encodeURIComponent(song_id)}&lv=1&tv=1`,
+            `https://music.163.com/api/song/lyric?id=${song_id}&lv=1&tv=1`,
             { headers, signal: AbortSignal.timeout(15000) }
           ),
         ]);
 
-      if (!detailResponse.ok || !lyricResponse.ok) {
-        throw new Error("网易云歌曲信息请求失败");
-      }
+        if (!detailResponse.ok || !lyricResponse.ok) {
+          throw new Error("网易云歌曲信息请求失败");
+        }
 
-      const [detail, lyricData] = await Promise.all([
-        detailResponse.json(),
-        lyricResponse.json(),
-      ]);
+        const [detail, lyricData]: any = await Promise.all([
+          detailResponse.json(),
+          lyricResponse.json(),
+        ]);
 
-      const song =
-        detail.songs?.[0] ??
-        detail.songs?.songs?.[0] ??
-        null;
+        const song = detail.songs?.[0];
 
-      if (!song) {
-        throw new Error("没有获取到歌曲详情，请检查歌曲ID");
-      }
+        if (!song) {
+          throw new Error("没有找到对应歌曲");
+        }
 
-      const lyric = lyricData.lrc?.lyric ?? "";
-      const artists = (song.artists ?? song.ar ?? []).map(
-        (artist: any) => artist.name
-      );
+        const lyrics = lyricData.lrc?.lyric || "";
 
-      return {
-        content: [
-          {
+        return {
+          content: [{
             type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                song: {
-                  song_id: String(song.id),
-                  name: song.name,
-                  artists,
-                  album: song.album?.name ?? song.al?.name ?? "",
-                  duration_ms: song.duration ?? song.dt ?? 0,
-                  duration_seconds: Math.floor(
-                    (song.duration ?? song.dt ?? 0) / 1000
-                  ),
-                },
-                lyrics_available: Boolean(lyric),
-                lyrics: lyric,
-                audio_url:
-                  `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(song_id)}.mp3`,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `获取网易云歌曲信息失败：${
-              error instanceof Error
-                ? error.message
-                : String(error)
-            }`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-);
-
-
-
-  
-server.registerTool(
-  "check_netease_audio",
-  {
-    title: "检查网易云音频",
-    description:
-      "检查指定网易云歌曲的音频地址是否可访问，并检查歌曲时长和音频响应信息。仅用于有权使用的音源。",
-    inputSchema: {
-      song_id: z.string().min(1).describe("网易云歌曲ID"),
-    },
-  },
-  async ({ song_id }) => {
-    try {
-      const detailUrl =
-        `https://music.163.com/api/song/detail/?id=${encodeURIComponent(song_id)}&ids=%5B${encodeURIComponent(song_id)}%5D`;
-
-      const detailResponse = await fetch(detailUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Referer: "https://music.163.com/",
-        },
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (!detailResponse.ok) {
-        throw new Error("无法获取歌曲详情");
-      }
-
-      const detail = await detailResponse.json();
-      const song = detail.songs?.[0];
-
-      if (!song) {
-        throw new Error("没有找到对应歌曲");
-      }
-
-      const durationMs = song.duration ?? song.dt ?? 0;
-      const durationSeconds = Math.floor(durationMs / 1000);
-
-      const audioUrl =
-        `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(song_id)}.mp3`;
-
-      const audioResponse = await fetch(audioUrl, {
-        method: "HEAD",
-        redirect: "follow",
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Referer: "https://music.163.com/",
-        },
-        signal: AbortSignal.timeout(20000),
-      });
-
-      const contentLength = Number(
-        audioResponse.headers.get("content-length") ?? 0
-      );
-
-      const contentType =
-        audioResponse.headers.get("content-type") ?? "unknown";
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                song_name: song.name,
-                artists: (song.artists ?? song.ar ?? []).map(
+            text: JSON.stringify({
+              success: true,
+              song: {
+                song_id: String(song.id),
+                name: song.name,
+                artists: (song.artists || song.ar || []).map(
                   (artist: any) => artist.name
                 ),
-                duration_seconds: durationSeconds,
-                duration_minutes: Number(
-                  (durationSeconds / 60).toFixed(2)
-                ),
-                audio_accessible: audioResponse.ok,
-                http_status: audioResponse.status,
-                content_type: contentType,
-                file_size_bytes: contentLength || null,
-                file_size_mb: contentLength
-                  ? Number(
-                      (contentLength / 1024 / 1024).toFixed(2)
-                    )
-                  : null,
-                duration_under_5_minutes:
-                  durationSeconds <= 300,
-                note:
-                  "HEAD 请求结果仅用于初步检查，不能保证实际下载或上传一定成功。请确保拥有音源使用授权。",
+                album: song.album?.name || song.al?.name || "",
+                duration_ms: song.duration || song.dt || 0,
               },
-              null,
-              2
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `音频检查失败：${
-              error instanceof Error
-                ? error.message
-                : String(error)
-            }`,
-          },
-        ],
-        isError: true,
-      };
+              lyrics_available: Boolean(lyrics),
+              lyrics,
+              audio_url:
+                `https://music.163.com/song/media/outer/url?id=${song_id}.mp3`,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return errorResult(error);
+      }
     }
-  }
-);
+  );
 
-  
+  // 9. 检查网易云音频
+
+  server.registerTool(
+    "check_netease_audio",
+    {
+      title: "检查网易云音频",
+      description: "检查音频地址响应及歌曲时长。",
+      inputSchema: z.object({
+        song_id: z.string().min(1),
+      }),
+    },
+    async ({ song_id }) => {
+      try {
+        const response = await fetch(
+          `https://music.163.com/api/song/detail/?id=${song_id}&ids=%5B${song_id}%5D`,
+          {
+            headers: {
+              "User-Agent": "Mozilla/5.0",
+              Referer: "https://music.163.com/",
+            },
+            signal: AbortSignal.timeout(15000),
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error("无法获取歌曲详情");
+        }
+
+        const detail: any = await response.json();
+        const song = detail.songs?.[0];
+
+        if (!song) {
+          throw new Error("没有找到歌曲");
+        }
+
+        const durationSeconds = Math.floor(
+          (song.duration || song.dt || 0) / 1000
+        );
+
+        const audioUrl =
+          `https://music.163.com/song/media/outer/url?id=${song_id}.mp3`;
+
+        const audioResponse = await fetch(audioUrl, {
+          method: "HEAD",
+          redirect: "follow",
+          headers: {
+            "User-Agent": "Mozilla/5.0",
+            Referer: "https://music.163.com/",
+          },
+          signal: AbortSignal.timeout(20000),
+        });
+
+        const length = Number(
+          audioResponse.headers.get("content-length") || 0
+        );
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              song_name: song.name,
+              artists: (song.artists || song.ar || []).map(
+                (artist: any) => artist.name
+              ),
+              duration_seconds: durationSeconds,
+              duration_minutes: Number((durationSeconds / 60).toFixed(2)),
+              audio_accessible: audioResponse.ok,
+              http_status: audioResponse.status,
+              content_type:
+                audioResponse.headers.get("content-type"),
+              file_size_bytes: length || null,
+              file_size_mb: length
+                ? Number((length / 1024 / 1024).toFixed(2))
+                : null,
+              duration_under_5_minutes: durationSeconds <= 300,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // 10. 查询任务进度
+
   server.registerTool(
     "check_song_status",
     {
       title: "查询歌曲生成进度",
       description:
-        "根据任务 ID 查询海绵音乐歌曲生成进度。" +
-        "任务状态为 0 表示排队中，1 表示生成中，" +
-        "2 且进度为 100 表示完成，3 表示失败。",
+        "根据任务 ID 查询海绵音乐生成进度。0 排队，1 生成中，2 且进度 100 为完成，3 失败。",
       inputSchema: z.object({
-        task_id: z.string().min(1).describe(
-          "歌曲生成任务 ID"
-        ),
+        task_id: z.string().min(1),
       }),
     },
     async ({ task_id }) => {
@@ -830,37 +679,27 @@ server.registerTool(
           try {
             payload = JSON.parse(payload);
           } catch {
-            // 解析失败时保留原始 payload
+            // 保留原始值
           }
         }
-
-        const status =
-          result?.data?.status ??
-          result?.status ??
-          payload?.status;
-
-        const progress =
-          payload?.progress ??
-          result?.data?.progress ??
-          result?.progress;
-
-        const modelVersion =
-          payload?.model_version ??
-          result?.data?.model_version;
 
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               task_id,
-              status,
-              progress,
-              model_version: modelVersion,
+              status:
+                result?.data?.status ??
+                result?.status ??
+                payload?.status,
+              progress:
+                payload?.progress ??
+                result?.data?.progress ??
+                result?.progress,
               detail: payload ?? result?.data ?? result,
             }, null, 2),
           }],
         };
-
       } catch (error) {
         return errorResult(error);
       }
@@ -870,7 +709,7 @@ server.registerTool(
 });
 
 // ==========================================
-// 保留 MCP 访问令牌鉴权
+// MCP 鉴权
 // ==========================================
 
 async function authorizedHandler(request: Request) {
@@ -883,22 +722,15 @@ async function authorizedHandler(request: Request) {
     );
   }
 
-  const authorization =
-    request.headers.get("authorization");
-
-  if (authorization !== `Bearer ${expectedToken}`) {
-    return new Response(
-      "Unauthorized",
-      { status: 401 }
-    );
+  if (
+    request.headers.get("authorization") !==
+    `Bearer ${expectedToken}`
+  ) {
+    return new Response("Unauthorized", { status: 401 });
   }
 
   return handler(request);
 }
-
-// ==========================================
-// 导出 GET / POST
-// ==========================================
 
 export {
   authorizedHandler as GET,
