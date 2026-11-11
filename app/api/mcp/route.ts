@@ -449,6 +449,149 @@ const handler = createMcpHandler((server) => {
   // 6. 查询歌曲生成进度
   // ----------------------------------------
 
+server.registerTool(
+  "search_netease_song",
+  {
+    title: "搜索网易云歌曲",
+    description:
+      "根据歌曲名称和歌手名称搜索网易云音乐，返回歌曲ID、歌名、歌手、专辑和时长。优先核对歌曲名称和歌手，排除伴奏及明显不匹配的结果。",
+    inputSchema: {
+      song_name: z.string().min(1).describe("歌曲名称"),
+      artist_name: z.string().min(1).describe("歌手名称"),
+    },
+  },
+  async ({ song_name, artist_name }) => {
+    try {
+      const keyword = `${song_name} ${artist_name}`;
+
+      const url =
+        "https://music.163.com/api/search/get/?" +
+        new URLSearchParams({
+          s: keyword,
+          type: "1",
+          limit: "10",
+          offset: "0",
+        }).toString();
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+          Referer: "https://music.163.com/",
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!response.ok) {
+        throw new Error(
+          `网易云搜索请求失败，HTTP ${response.status}`
+        );
+      }
+
+      const result = await response.json();
+
+      if (result.code !== 200) {
+        throw new Error(
+          `网易云返回异常状态：${result.code}`
+        );
+      }
+
+      const songs = result.result?.songs ?? [];
+
+      if (songs.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "没有搜索到相关歌曲，请检查歌名和歌手名称。",
+            },
+          ],
+        };
+      }
+
+      const normalize = (value: string) =>
+        value.toLowerCase().replace(/\s+/g, "").trim();
+
+      const targetSong = normalize(song_name);
+      const targetArtist = normalize(artist_name);
+
+      const candidates = songs.map((song: any) => {
+        const artists = (song.artists ?? []).map(
+          (artist: any) => artist.name
+        );
+
+        const songTitle = normalize(song.name);
+        const artistNames = artists.map(normalize);
+
+        const exactTitle = songTitle === targetSong;
+        const exactArtist = artistNames.includes(targetArtist);
+
+        const isInstrumental =
+          song.name.includes("伴奏") ||
+          song.name.includes("纯音乐");
+
+        return {
+          song_id: song.id,
+          song_name: song.name,
+          artists,
+          album: song.album?.name ?? "",
+          duration_ms: song.duration ?? 0,
+          duration:
+            `${Math.floor((song.duration ?? 0) / 60000)}分` +
+            `${Math.floor(((song.duration ?? 0) % 60000) / 1000)}秒`,
+          exact_title: exactTitle,
+          exact_artist: exactArtist,
+          instrumental: isInstrumental,
+          matched:
+            exactTitle && exactArtist && !isInstrumental,
+        };
+      });
+
+      candidates.sort((a: any, b: any) => {
+        return Number(b.matched) - Number(a.matched);
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                search_keyword: keyword,
+                total: candidates.length,
+                best_match:
+                  candidates.find((song: any) => song.matched) ??
+                  null,
+                songs: candidates,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `网易云歌曲搜索失败：${
+              error instanceof Error
+                ? error.message
+                : String(error)
+            }`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+
+  
   server.registerTool(
     "check_song_status",
     {
