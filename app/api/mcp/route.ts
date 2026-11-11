@@ -167,7 +167,7 @@ const handler = createMcpHandler((server) => {
     {
       title: "查询已上传原曲",
       description:
-        "查询用户在海绵音乐中上传的原曲，获取翻唱任务需要的 item_id。",
+        "查询用户在海绵音乐中上传的原曲，获取翻唱任务需要的素材 ID。",
       inputSchema: z.object({}),
     },
     async () => {
@@ -203,8 +203,8 @@ const handler = createMcpHandler((server) => {
         "如果当前对话角色是 Krueger，传入 character='krueger'。" +
         "服务端会自动匹配对应的数字 voice_id。" +
         "prompt 用于描述歌曲风格和演唱要求。" +
-        "当前版本支持已验证的原创歌曲请求，暂不支持翻唱。" +
-        "提交成功后返回两个任务 ID，可分别调用 check_song_status 查询进度。",
+        "当前版本支持已验证的原创歌曲请求。" +
+        "提交成功后返回任务 ID，可调用 check_song_status 查询进度。",
       inputSchema: z.object({
         prompt: z.string().min(1).describe(
           "歌曲风格和演唱要求，例如：国风，民谣，温柔男声"
@@ -229,7 +229,6 @@ const handler = createMcpHandler((server) => {
       voice_id,
     }) => {
       try {
-        // 优先使用角色映射
         const selectedVoiceId = character
           ? VOICE_MAP[character]
           : voice_id;
@@ -246,7 +245,7 @@ const handler = createMcpHandler((server) => {
           };
         }
 
-        // 严格按照网页端成功请求构造原创请求体
+        // 严格保留已经验证成功的原创请求参数
         const requestBody: Record<string, unknown> = {
           prompt,
           is_original_prompt: true,
@@ -262,15 +261,10 @@ const handler = createMcpHandler((server) => {
           requestBody
         );
 
-        // ==================================
-        // 关键修正：从 data.tasks 数组提取任务
-        // ==================================
-
         const tasks = Array.isArray(result?.data?.tasks)
           ? result.data.tasks
           : [];
 
-        // 兼容旧的单任务返回结构
         const normalizedTasks = tasks.length > 0
           ? tasks
           : (() => {
@@ -298,7 +292,6 @@ const handler = createMcpHandler((server) => {
           };
         }
 
-        // 整理任务信息
         const taskDetails = normalizedTasks.map(
           (task: any, index: number) => ({
             index: index + 1,
@@ -325,7 +318,7 @@ const handler = createMcpHandler((server) => {
               `使用数字音色 ID：${selectedVoiceId}\n` +
               `成功创建任务数：${taskDetails.length}\n\n` +
               taskText +
-              "\n\n请分别保存任务 ID，稍后调用 check_song_status 查询各首歌曲的进度。",
+              "\n\n请保存任务 ID，稍后调用 check_song_status 查询歌曲进度。",
           }],
         };
 
@@ -336,7 +329,124 @@ const handler = createMcpHandler((server) => {
   );
 
   // ----------------------------------------
-  // 5. 查询歌曲生成进度
+  // 5. 提交歌曲翻唱任务
+  // 使用已经抓包验证成功的请求参数
+  // ----------------------------------------
+
+  server.registerTool(
+    "start_song_cover",
+    {
+      title: "开始翻唱歌曲",
+      description:
+        "使用海绵音乐中已经上传的原曲素材进行翻唱。" +
+        "需要提供原曲素材 item_id、歌词和风格描述。" +
+        "Graves 角色传入 character='graves'；" +
+        "Krueger 角色传入 character='krueger'。" +
+        "服务端自动匹配对应数字 voice_id。" +
+        "提交成功后返回 task_id，可调用 check_song_status 查询进度。",
+      inputSchema: z.object({
+        source_item_id: z.string().min(1).describe(
+          "海绵音乐已上传原曲素材的 item_id"
+        ),
+
+        lyrics: z.string().min(1).describe(
+          "歌曲歌词，按段落换行"
+        ),
+
+        prompt: z.string().min(1).default(
+          "严格参考原曲进行翻唱"
+        ).describe(
+          "演唱风格和要求"
+        ),
+
+        character: z.enum([
+          "graves",
+          "krueger",
+        ]).describe(
+          "演唱角色：Graves 或 Krueger"
+        ),
+      }),
+    },
+
+    async ({
+      source_item_id,
+      lyrics,
+      prompt,
+      character,
+    }) => {
+      try {
+        const selectedVoiceId = VOICE_MAP[character];
+
+        // 严格按照网页端已经成功的翻唱请求构造请求体
+        const requestBody: Record<string, unknown> = {
+          prompt,
+          lyrics,
+          is_original_prompt: true,
+          voice_id: Number(selectedVoiceId),
+          task_type: 1,
+          source_item: [
+            {
+              item: {
+                item_id: source_item_id,
+                item_type: 0,
+              },
+            },
+          ],
+          biz_type: 7,
+          batch_size: 1,
+        };
+
+        const result: any = await haimianRequest(
+          "/jd/api/v1/generate/music",
+          "POST",
+          requestBody
+        );
+
+        const tasks = Array.isArray(result?.data?.tasks)
+          ? result.data.tasks
+          : [];
+
+        if (tasks.length === 0 || !tasks[0]?.task_id) {
+          return {
+            content: [{
+              type: "text",
+              text:
+                "翻唱请求已返回，但没有找到任务 ID。\n" +
+                JSON.stringify(result, null, 2),
+            }],
+            isError: true,
+          };
+        }
+
+        const taskText = tasks.map(
+          (task: any, index: number) =>
+            `第 ${index + 1} 首：\n` +
+            `任务 ID：${task.task_id}\n` +
+            `歌曲 ID：${task.song_id ?? "暂无"}\n` +
+            `批次 ID：${task.batch_id ?? "暂无"}`
+        ).join("\n\n");
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              "翻唱任务已成功提交！\n\n" +
+              `演唱角色：${character}\n` +
+              `音色 ID：${selectedVoiceId}\n` +
+              `原曲素材 ID：${source_item_id}\n\n` +
+              taskText +
+              "\n\n请稍后调用 check_song_status 查询生成进度。",
+          }],
+        };
+
+      } catch (error) {
+        return errorResult(error);
+      }
+    }
+  );
+
+  // ----------------------------------------
+  // 6. 查询歌曲生成进度
   // ----------------------------------------
 
   server.registerTool(
