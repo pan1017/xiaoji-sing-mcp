@@ -44,13 +44,39 @@ async function haimianRequest(
     }
   );
 
+  const responseText = await response.text();
+
   if (!response.ok) {
     throw new Error(
-      `海绵音乐接口请求失败，HTTP ${response.status}`
+      `海绵音乐接口请求失败，HTTP ${response.status}：${responseText.slice(0, 1000)}`
     );
   }
 
-  return await response.json();
+  let result: any;
+
+  try {
+    result = JSON.parse(responseText);
+  } catch {
+    throw new Error(
+      `海绵音乐返回的不是有效 JSON：${responseText.slice(0, 1000)}`
+    );
+  }
+
+  // 检查海绵音乐业务状态码
+  if (
+    typeof result?.status_code === "number" &&
+    result.status_code !== 0
+  ) {
+    const message =
+      result?.status_info?.status_msg ||
+      "海绵音乐返回业务异常";
+
+    throw new Error(
+      `海绵音乐业务错误：${message}；状态码：${result.status_code}；log_id：${result?.status_info?.log_id || result?.log_id || "无"}`
+    );
+  }
+
+  return result;
 }
 
 // ==========================================
@@ -166,62 +192,43 @@ const handler = createMcpHandler((server) => {
 
   // ----------------------------------------
   // 4. 提交歌曲生成任务
+  // 当前只启用已经抓包验证的原创模式
   // ----------------------------------------
 
   server.registerTool(
     "start_song_generation",
     {
-      title: "开始生成歌曲",
+      title: "开始生成原创歌曲",
       description:
-        "根据用户提供的歌词、风格和角色音色，在海绵音乐中提交歌曲生成任务。" +
+        "调用海绵音乐生成原创歌曲。目前使用已经通过网页抓包验证的原创请求参数。" +
         "如果当前对话角色是 Graves，必须传入 character='graves'；" +
         "如果当前对话角色是 Krueger，必须传入 character='krueger'。" +
         "服务端会自动匹配对应的数字 voice_id。" +
-        "如果使用其他音色，可以不传 character，改为手动传入 voice_id。" +
-        "用户提供已上传原曲的 item_id 时，可进行翻唱；" +
-        "否则按原创歌曲方式提交。返回任务 ID，生成过程在后台进行。",
+        "prompt 用于描述歌曲风格、曲风和演唱要求。" +
+        "当前版本只支持已验证的原创歌曲请求，不支持翻唱参数。" +
+        "提交成功后返回任务 ID，后续使用 check_song_status 查询进度。",
       inputSchema: z.object({
-        title: z.string().min(1).describe(
-          "歌曲标题"
-        ),
-
         prompt: z.string().min(1).describe(
-          "歌曲风格和演唱要求"
-        ),
-
-        lyrics: z.string().min(1).describe(
-          "用户有权使用的歌词"
+          "歌曲风格和演唱要求，例如：国风，民谣，温柔男声"
         ),
 
         character: z.enum([
           "graves",
           "krueger",
         ]).optional().describe(
-          "当前演唱角色。Graves 填 graves，Krueger 填 krueger。填写后自动使用对应的数字音色 ID"
+          "当前演唱角色。Graves 填 graves，Krueger 填 krueger"
         ),
 
         voice_id: z.string().min(1).optional().describe(
           "手动指定数字音色 ID。仅在不使用 Graves 或 Krueger 角色映射时填写"
         ),
-
-        source_item_id: z.string().optional().describe(
-          "翻唱时使用的已上传原曲 item_id；原创歌曲不填写"
-        ),
-
-        genre: z.string().optional().describe(
-          "原创歌曲的音乐类型，例如 Folk、Pop"
-        ),
       }),
     },
 
     async ({
-      title,
       prompt,
-      lyrics,
       character,
       voice_id,
-      source_item_id,
-      genre,
     }) => {
       try {
 
@@ -243,35 +250,16 @@ const handler = createMcpHandler((server) => {
           };
         }
 
-        // 是否为翻唱任务
-        const isCover = Boolean(source_item_id);
-
-        // 原创参数根据网页端实际请求调整
+        // 严格按照网页端成功请求构造原创请求体
+        // 不添加 title、lyrics、genre、source_item 等字段
         const requestBody: Record<string, unknown> = {
-          title,
           prompt,
-          lyrics,
-          is_original_prompt: !isCover,
-          voice_id: selectedVoiceId,
+          is_original_prompt: true,
+          voice_id: Number(selectedVoiceId),
           task_type: 1,
-          biz_type: isCover ? 7 : 0,
-          batch_size: isCover ? 1 : 2,
+          biz_type: 0,
+          batch_size: 2,
         };
-
-        // 翻唱任务添加原曲信息
-        if (isCover) {
-          requestBody.source_item = [
-            {
-              item: {
-                item_id: source_item_id,
-                item_type: 4,
-              },
-            },
-          ];
-        } else if (genre) {
-          // 原创歌曲可选音乐类型
-          requestBody.genre = genre;
-        }
 
         const result: any = await haimianRequest(
           "/jd/api/v1/generate/music",
@@ -291,9 +279,9 @@ const handler = createMcpHandler((server) => {
             content: [{
               type: "text",
               text:
-                "请求已返回，但没有识别到任务 ID。\n" +
+                "海绵音乐没有返回可识别的任务 ID。\n" +
                 "接口响应：" +
-                JSON.stringify(result),
+                JSON.stringify(result, null, 2),
             }],
             isError: true,
           };
@@ -303,11 +291,9 @@ const handler = createMcpHandler((server) => {
           content: [{
             type: "text",
             text:
-              "歌曲生成任务已提交。\n" +
-              `歌曲名称：${title}\n` +
+              "原创歌曲生成任务已提交。\n" +
               `演唱角色：${character || "手动指定音色"}\n` +
               `使用数字音色 ID：${selectedVoiceId}\n` +
-              `任务类型：${isCover ? "翻唱" : "原创"}\n` +
               `任务 ID：${taskId}\n` +
               "请保存任务 ID，稍后调用 check_song_status 查询进度。",
           }],
