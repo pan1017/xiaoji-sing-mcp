@@ -4,7 +4,6 @@ import { z } from "zod";
 
 // ==========================================
 // 角色与海绵音乐克隆音色的对应关系
-// 使用数字 voice_id，不使用 prompt_vid / preview_vid
 // ==========================================
 
 const VOICE_MAP: Record<string, string> = {
@@ -34,10 +33,10 @@ async function haimianRequest(
     {
       method,
       headers: {
-        "Cookie": cookie,
+        Cookie: cookie,
         "Content-Type": "application/json",
-        "Origin": "https://www.haimian.com",
-        "Referer": "https://www.haimian.com/create",
+        Origin: "https://www.haimian.com",
+        Referer: "https://www.haimian.com/create",
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
       cache: "no-store",
@@ -62,7 +61,6 @@ async function haimianRequest(
     );
   }
 
-  // 检查海绵音乐业务状态码
   if (
     typeof result?.status_code === "number" &&
     result.status_code !== 0
@@ -192,7 +190,7 @@ const handler = createMcpHandler((server) => {
 
   // ----------------------------------------
   // 4. 提交歌曲生成任务
-  // 当前只启用已经抓包验证的原创模式
+  // 当前使用已验证的原创请求参数
   // ----------------------------------------
 
   server.registerTool(
@@ -200,13 +198,13 @@ const handler = createMcpHandler((server) => {
     {
       title: "开始生成原创歌曲",
       description:
-        "调用海绵音乐生成原创歌曲。目前使用已经通过网页抓包验证的原创请求参数。" +
-        "如果当前对话角色是 Graves，必须传入 character='graves'；" +
-        "如果当前对话角色是 Krueger，必须传入 character='krueger'。" +
+        "调用海绵音乐生成原创歌曲。" +
+        "如果当前对话角色是 Graves，传入 character='graves'；" +
+        "如果当前对话角色是 Krueger，传入 character='krueger'。" +
         "服务端会自动匹配对应的数字 voice_id。" +
-        "prompt 用于描述歌曲风格、曲风和演唱要求。" +
-        "当前版本只支持已验证的原创歌曲请求，不支持翻唱参数。" +
-        "提交成功后返回任务 ID，后续使用 check_song_status 查询进度。",
+        "prompt 用于描述歌曲风格和演唱要求。" +
+        "当前版本支持已验证的原创歌曲请求，暂不支持翻唱。" +
+        "提交成功后返回两个任务 ID，可分别调用 check_song_status 查询进度。",
       inputSchema: z.object({
         prompt: z.string().min(1).describe(
           "歌曲风格和演唱要求，例如：国风，民谣，温柔男声"
@@ -231,9 +229,7 @@ const handler = createMcpHandler((server) => {
       voice_id,
     }) => {
       try {
-
-        // 优先使用角色映射；
-        // 没有角色时使用手动指定的数字 voice_id
+        // 优先使用角色映射
         const selectedVoiceId = character
           ? VOICE_MAP[character]
           : voice_id;
@@ -251,7 +247,6 @@ const handler = createMcpHandler((server) => {
         }
 
         // 严格按照网页端成功请求构造原创请求体
-        // 不添加 title、lyrics、genre、source_item 等字段
         const requestBody: Record<string, unknown> = {
           prompt,
           is_original_prompt: true,
@@ -267,19 +262,35 @@ const handler = createMcpHandler((server) => {
           requestBody
         );
 
-        // 兼容不同的任务 ID 返回结构
-        const taskId =
-          result?.data?.task_id ??
-          result?.data?.taskId ??
-          result?.task_id ??
-          result?.taskId;
+        // ==================================
+        // 关键修正：从 data.tasks 数组提取任务
+        // ==================================
 
-        if (!taskId) {
+        const tasks = Array.isArray(result?.data?.tasks)
+          ? result.data.tasks
+          : [];
+
+        // 兼容旧的单任务返回结构
+        const normalizedTasks = tasks.length > 0
+          ? tasks
+          : (() => {
+              const oldTaskId =
+                result?.data?.task_id ??
+                result?.data?.taskId ??
+                result?.task_id ??
+                result?.taskId;
+
+              return oldTaskId
+                ? [{ task_id: oldTaskId }]
+                : [];
+            })();
+
+        if (normalizedTasks.length === 0) {
           return {
             content: [{
               type: "text",
               text:
-                "海绵音乐没有返回可识别的任务 ID。\n" +
+                "海绵音乐已返回成功状态，但没有找到任务 ID。\n" +
                 "接口响应：" +
                 JSON.stringify(result, null, 2),
             }],
@@ -287,15 +298,34 @@ const handler = createMcpHandler((server) => {
           };
         }
 
+        // 整理任务信息
+        const taskDetails = normalizedTasks.map(
+          (task: any, index: number) => ({
+            index: index + 1,
+            task_id: task.task_id,
+            song_id: task.song_id ?? null,
+            batch_id: task.batch_id ?? null,
+          })
+        );
+
+        const taskText = taskDetails
+          .map((task: any) =>
+            `第 ${task.index} 首：\n` +
+            `任务 ID：${task.task_id}\n` +
+            `歌曲 ID：${task.song_id ?? "暂无"}`
+          )
+          .join("\n\n");
+
         return {
           content: [{
             type: "text",
             text:
-              "原创歌曲生成任务已提交。\n" +
+              "歌曲生成任务已成功提交！\n\n" +
               `演唱角色：${character || "手动指定音色"}\n` +
               `使用数字音色 ID：${selectedVoiceId}\n` +
-              `任务 ID：${taskId}\n` +
-              "请保存任务 ID，稍后调用 check_song_status 查询进度。",
+              `成功创建任务数：${taskDetails.length}\n\n` +
+              taskText +
+              "\n\n请分别保存任务 ID，稍后调用 check_song_status 查询各首歌曲的进度。",
           }],
         };
 
