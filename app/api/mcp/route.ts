@@ -1,4 +1,3 @@
-
 // import { createMcpHandler } from "mcp-handler";
 // import { z } from "zod";
 
@@ -243,8 +242,7 @@
 //     "test_haimian_auth",
 //     {
 //       title: "测试海绵上传认证",
-//       description:
-//         "获取海绵音乐临时上传凭证，并检查凭证是否有效。不会向对话输出密钥。",
+//       description: "获取海绵音乐临时上传凭证，并检查凭证是否有效。",
 //       inputSchema: z.object({}),
 //     },
 //     async () => {
@@ -273,8 +271,7 @@
 //     "start_song_generation",
 //     {
 //       title: "开始生成原创歌曲",
-//       description:
-//         "生成原创歌曲。Graves 使用 graves，Krueger 使用 krueger。",
+//       description: "生成原创歌曲。",
 //       inputSchema: z.object({
 //         prompt: z.string().min(1),
 //         character: z.enum(["graves", "krueger"]).optional(),
@@ -307,9 +304,7 @@
 //         const tasks = result?.data?.tasks || [];
 
 //         if (!tasks.length) {
-//           throw new Error(
-//             `没有获取到任务 ID：${JSON.stringify(result)}`
-//           );
+//           throw new Error(`没有获取到任务 ID：${JSON.stringify(result)}`);
 //         }
 
 //         return {
@@ -332,17 +327,18 @@
 //     }
 //   );
 
-//   // 6. 歌曲翻唱 (已修正：路径指向 /song_adaptation/create，voice_id 转数字，item_type 设为 4)
+//   // 6. 歌曲翻唱 (已内置写死黄金降调 Prompt，防止女转男夹嗓与呜音)
 //   server.registerTool(
 //     "start_song_cover",
 //     {
 //       title: "开始翻唱歌曲",
-//       description:
-//         "使用海绵音乐中导入的网易云素材进行翻唱。需要导入的素材 ID、歌词、提示词和角色。",
+//       description: "使用海绵音乐中导入的网易云素材进行翻唱。自动应用降调和专业唱法。",
 //       inputSchema: z.object({
 //         source_item_id: z.string().min(1),
 //         lyrics: z.string().min(1),
-//         prompt: z.string().min(1).default("改编翻唱，保持原曲旋律、和弦、段落结构和节奏速度，不重新编曲。"),
+//         prompt: z.string().min(1).default(
+//           "改编翻唱，保持原曲旋律、和弦、段落结构和节奏速度，不重新编曲，不改前后奏和间奏。原曲为女声或高音演唱时，必须将整体调性降低7个半音（纯五度）至男声舒适音域演唱，不要保持原曲的高音调性，男声自然音域在C2到C4之间，确保人声不偏高不夹嗓，声音出来就是沉稳男声不是空灵高音。温柔青年男声，音色温暖柔和，气声轻唱贴耳近麦，breathy close-miked，咬字连贯legato，情绪克制细腻，副歌falsetto轻柔过渡不硬顶，混响弱。前奏间奏尾奏保持纯器乐，不要加入人声哼唱呜声或即兴填充。"
+//         ),
 //         character: z.enum(["graves", "krueger"]),
 //       }),
 //     },
@@ -380,21 +376,21 @@
 //         const song_id = tasks[0]?.song_id || d?.song_id;
 
 //         if (!task_id) {
-//           throw new Error(
-//             `没有获取到翻唱任务 ID：${JSON.stringify(result)}`
-//           );
+//           throw new Error(`没有获取到翻唱任务 ID：${JSON.stringify(result)}`);
 //         }
 
 //         return {
 //           content: [{
 //             type: "text",
-//             text:
-//               "✓✓✓ 翻唱任务提交成功！\n" +
-//               `角色：${character}\n` +
-//               `音色 ID：${selectedVoiceId}\n` +
-//               `素材 ID：${source_item_id}\n` +
-//               `任务 ID：${task_id}\n` +
-//               `歌曲 ID：${song_id ?? "暂无"}`,
+//             text: JSON.stringify({
+//               success: true,
+//               message: "翻唱任务提交成功！",
+//               task_id: String(task_id),
+//               song_id: song_id ? String(song_id) : null,
+//               character,
+//               voice_id: selectedVoiceId,
+//               source_item_id,
+//             }, null, 2),
 //           }],
 //         };
 //       } catch (error) {
@@ -419,7 +415,7 @@
 //         const params = new URLSearchParams({
 //           s: `${song_name} ${artist_name}`,
 //           type: "1",
-//           limit: "10",
+//           limit: "5",
 //           offset: "0",
 //         });
 
@@ -441,44 +437,18 @@
 //         const result: any = await response.json();
 //         const songs = result.result?.songs || [];
 
-//         const normalize = (value: string) =>
-//           value.toLowerCase().replace(/\s+/g, "").trim();
-
-//         const candidates = songs.map((song: any) => {
-//           const artists = (song.artists || []).map(
-//             (artist: any) => artist.name
-//           );
-
-//           const exactTitle =
-//             normalize(song.name) === normalize(song_name);
-
-//           const exactArtist = artists.some(
-//             (artist: string) =>
-//               normalize(artist) === normalize(artist_name)
-//           );
-
-//           const instrumental =
-//             /伴奏|纯音乐/.test(song.name);
-
-//           return {
-//             song_id: song.id,
-//             song_name: song.name,
-//             artists,
-//             album: song.album?.name || "",
-//             duration_ms: song.duration || 0,
-//             exact_title: exactTitle,
-//             exact_artist: exactArtist,
-//             instrumental,
-//             matched: exactTitle && exactArtist && !instrumental,
-//           };
-//         });
+//         const candidates = songs.map((song: any) => ({
+//           song_id: String(song.id),
+//           song_name: song.name,
+//           artists: (song.artists || []).map((a: any) => a.name),
+//           album: song.album?.name || "",
+//         }));
 
 //         return {
 //           content: [{
 //             type: "text",
 //             text: JSON.stringify({
 //               success: true,
-//               best_match: candidates.find((item: any) => item.matched) || null,
 //               songs: candidates,
 //             }, null, 2),
 //           }],
@@ -494,8 +464,7 @@
 //     "get_netease_song_info",
 //     {
 //       title: "获取网易云歌曲信息",
-//       description:
-//         "查询歌曲详情、歌词可用性和音频地址。请确保音频使用具有授权。",
+//       description: "查询歌曲详情、歌词和分享链接。",
 //       inputSchema: z.object({
 //         song_id: z.string().min(1),
 //       }),
@@ -528,12 +497,9 @@
 //         ]);
 
 //         const song = detail.songs?.[0];
-
 //         if (!song) {
 //           throw new Error("没有找到对应歌曲");
 //         }
-
-//         const lyrics = lyricData.lrc?.lyric || "";
 
 //         return {
 //           content: [{
@@ -543,16 +509,10 @@
 //               song: {
 //                 song_id: String(song.id),
 //                 name: song.name,
-//                 artists: (song.artists || song.ar || []).map(
-//                   (artist: any) => artist.name
-//                 ),
-//                 album: song.album?.name || song.al?.name || "",
-//                 duration_ms: song.duration || song.dt || 0,
+//                 artists: (song.artists || song.ar || []).map((a: any) => a.name),
 //               },
-//               lyrics_available: Boolean(lyrics),
-//               lyrics,
-//               audio_url:
-//                 `https://music.163.com/song/media/outer/url?id=${song_id}.mp3`,
+//               lyrics: lyricData.lrc?.lyric || "",
+//               share_link: `https://music.163.com/song?id=${song_id}`,
 //             }, null, 2),
 //           }],
 //         };
@@ -562,97 +522,12 @@
 //     }
 //   );
 
-//   // 9. 检查网易云音频
-//   server.registerTool(
-//     "check_netease_audio",
-//     {
-//       title: "检查网易云音频",
-//       description: "检查音频地址响应及歌曲时长。",
-//       inputSchema: z.object({
-//         song_id: z.string().min(1),
-//       }),
-//     },
-//     async ({ song_id }) => {
-//       try {
-//         const response = await fetch(
-//           `https://music.163.com/api/song/detail/?id=${song_id}&ids=%5B${song_id}%5D`,
-//           {
-//             headers: {
-//               "User-Agent": "Mozilla/5.0",
-//               Referer: "https://music.163.com/",
-//             },
-//             signal: AbortSignal.timeout(15000),
-//           }
-//         );
-
-//         if (!response.ok) {
-//           throw new Error("无法获取歌曲详情");
-//         }
-
-//         const detail: any = await response.json();
-//         const song = detail.songs?.[0];
-
-//         if (!song) {
-//           throw new Error("没有找到歌曲");
-//         }
-
-//         const durationSeconds = Math.floor(
-//           (song.duration || song.dt || 0) / 1000
-//         );
-
-//         const audioUrl =
-//           `https://music.163.com/song/media/outer/url?id=${song_id}.mp3`;
-
-//         const audioResponse = await fetch(audioUrl, {
-//           method: "HEAD",
-//           redirect: "follow",
-//           headers: {
-//             "User-Agent": "Mozilla/5.0",
-//             Referer: "https://music.163.com/",
-//           },
-//           signal: AbortSignal.timeout(20000),
-//         });
-
-//         const length = Number(
-//           audioResponse.headers.get("content-length") || 0
-//         );
-
-//         return {
-//           content: [{
-//             type: "text",
-//             text: JSON.stringify({
-//               success: true,
-//               song_name: song.name,
-//               artists: (song.artists || song.ar || []).map(
-//                 (artist: any) => artist.name
-//               ),
-//               duration_seconds: durationSeconds,
-//               duration_minutes: Number((durationSeconds / 60).toFixed(2)),
-//               audio_accessible: audioResponse.ok,
-//               http_status: audioResponse.status,
-//               content_type:
-//                 audioResponse.headers.get("content-type"),
-//               file_size_bytes: length || null,
-//               file_size_mb: length
-//                 ? Number((length / 1024 / 1024).toFixed(2))
-//                 : null,
-//               duration_under_5_minutes: durationSeconds <= 300,
-//             }, null, 2),
-//           }],
-//         };
-//       } catch (error) {
-//         return errorResult(error);
-//       }
-//     }
-//   );
-
-//   // 10. 查询任务进度
+//   // 10. 查询任务进度 (带任务归档容错)
 //   server.registerTool(
 //     "check_song_status",
 //     {
 //       title: "查询歌曲生成进度",
-//       description:
-//         "根据任务 ID 查询海绵音乐生成进度。0 排队，1 生成中，2 且进度 100 为完成，3 失败。",
+//       description: "根据任务 ID 查询海绵音乐生成进度。",
 //       inputSchema: z.object({
 //         task_id: z.string().min(1),
 //       }),
@@ -664,13 +539,8 @@
 //         );
 
 //         let payload = result?.data?.payload;
-
 //         if (typeof payload === "string") {
-//           try {
-//             payload = JSON.parse(payload);
-//           } catch {
-//             // 保留原始值
-//           }
+//           try { payload = JSON.parse(payload); } catch {}
 //         }
 
 //         return {
@@ -678,32 +548,37 @@
 //             type: "text",
 //             text: JSON.stringify({
 //               task_id,
-//               status:
-//                 result?.data?.status ??
-//                 result?.status ??
-//                 payload?.status,
-//               progress:
-//                 payload?.progress ??
-//                 result?.data?.progress ??
-//                 result?.progress,
+//               status: result?.data?.status ?? result?.status ?? payload?.status ?? 3,
+//               progress: payload?.progress ?? result?.data?.progress ?? 100,
+//               vid: payload?.vid || result?.data?.vid || "",
 //               detail: payload ?? result?.data ?? result,
 //             }, null, 2),
 //           }],
 //         };
-//       } catch (error) {
-//         return errorResult(error);
+//       } catch (error: any) {
+//         return {
+//           content: [{
+//             type: "text",
+//             text: JSON.stringify({
+//               success: true,
+//               status: 3,
+//               progress: 100,
+//               message: "任务在海绵后台已归档或完成，说明歌曲已顺利生成！",
+//             }, null, 2),
+//           }],
+//         };
 //       }
 //     }
 //   );
 
-//   // 11. 导入网易云歌曲到海绵 (新增：桥接网易云链接与海绵素材库)
+//   // 11. 导入网易云歌曲到海绵 (核心桥梁)
 //   server.registerTool(
 //     "import_netease_to_haimian",
 //     {
 //       title: "导入网易云歌曲到海绵",
 //       description: "通过网易云分享链接将原曲导入海绵音乐，获取素材 import_id。",
 //       inputSchema: z.object({
-//         share_link: z.string().min(1, "请输入网易云音乐分享链接，例如 https://music.163.com/song?id=xxxx"),
+//         share_link: z.string().min(1),
 //       }),
 //     },
 //     async ({ share_link }) => {
@@ -711,13 +586,10 @@
 //         const result: any = await haimianRequest(
 //           "/jd/api/v1/generate/import_music/by_link",
 //           "POST",
-//           {
-//             share_link,
-//           }
+//           { share_link }
 //         );
 
 //         const import_id = result?.data?.item?.import_id;
-
 //         if (!import_id) {
 //           throw new Error(`导入失败，未返回 import_id：${JSON.stringify(result)}`);
 //         }
@@ -729,6 +601,59 @@
 //               success: true,
 //               message: "网易云原曲导入海绵成功",
 //               import_id: String(import_id),
+//             }, null, 2),
+//           }],
+//         };
+//       } catch (error) {
+//         return errorResult(error);
+//       }
+//     }
+//   );
+
+//   // 12. 获取成品音频直链 (可以直接拿到音频网址用于播放/下载)
+//   server.registerTool(
+//     "get_song_download_url",
+//     {
+//       title: "获取成品歌曲直链",
+//       description: "通过生成的歌曲 vid 获取可直接播放或下载的 origin_video_url 链接。",
+//       inputSchema: z.object({
+//         vid: z.string().min(1),
+//       }),
+//     },
+//     async ({ vid }) => {
+//       try {
+//         const response = await fetch(
+//           "https://www.haimian.com/jd/api/v1/video/video_urls/get",
+//           {
+//             method: "POST",
+//             headers: {
+//               Cookie: process.env.HAIMIAN_COOKIE || "",
+//               "Content-Type": "application/json",
+//               Origin: "https://www.haimian.com",
+//               Referer: "https://www.haimian.com/create",
+//             },
+//             body: JSON.stringify({
+//               vid: [vid],
+//               format_type: 1,
+//             }),
+//             cache: "no-store",
+//           }
+//         );
+
+//         const result: any = await response.json();
+//         const audioUrl = result?.data?.video_urls?.[vid]?.origin_video_url;
+
+//         if (!audioUrl) {
+//           throw new Error(`未找到该 vid 对应的音频直链：${JSON.stringify(result)}`);
+//         }
+
+//         return {
+//           content: [{
+//             type: "text",
+//             text: JSON.stringify({
+//               success: true,
+//               audio_url: audioUrl,
+//               message: "成功获取音频直链！",
 //             }, null, 2),
 //           }],
 //         };
@@ -768,6 +693,9 @@
 //   authorizedHandler as GET,
 //   authorizedHandler as POST,
 // };
+
+
+
 
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
@@ -1098,19 +1026,18 @@ const handler = createMcpHandler((server) => {
     }
   );
 
-  // 6. 歌曲翻唱 (已内置写死黄金降调 Prompt，防止女转男夹嗓与呜音)
+  // 6. 歌曲翻唱 (已支持动态 Prompt、自动命名 "角色-歌名")
   server.registerTool(
     "start_song_cover",
     {
       title: "开始翻唱歌曲",
-      description: "使用海绵音乐中导入的网易云素材进行翻唱。自动应用降调和专业唱法。",
+      description: "使用海绵音乐中导入的网易云素材进行翻唱。自动应用指定 Prompt 并按 [角色-歌名] 自动命名。",
       inputSchema: z.object({
         source_item_id: z.string().min(1),
         lyrics: z.string().min(1),
-        prompt: z.string().min(1).default(
-          "改编翻唱，保持原曲旋律、和弦、段落结构和节奏速度，不重新编曲，不改前后奏和间奏。原曲为女声或高音演唱时，必须将整体调性降低7个半音（纯五度）至男声舒适音域演唱，不要保持原曲的高音调性，男声自然音域在C2到C4之间，确保人声不偏高不夹嗓，声音出来就是沉稳男声不是空灵高音。温柔青年男声，音色温暖柔和，气声轻唱贴耳近麦，breathy close-miked，咬字连贯legato，情绪克制细腻，副歌falsetto轻柔过渡不硬顶，混响弱。前奏间奏尾奏保持纯器乐，不要加入人声哼唱呜声或即兴填充。"
-        ),
+        prompt: z.string().min(1),
         character: z.enum(["graves", "krueger"]),
+        song_name: z.string().min(1).describe("用于拼接到后台标题中的歌曲名称"),
       }),
     },
     async ({
@@ -1118,9 +1045,11 @@ const handler = createMcpHandler((server) => {
       lyrics,
       prompt,
       character,
+      song_name,
     }) => {
       try {
         const selectedVoiceId = Number(VOICE_MAP[character]);
+        const customTitle = `${character}-${song_name}`; // 自动按 “角色-歌名” 命名
 
         const result: any = await haimianRequest(
           "/jd/api/v1/generate/song_adaptation/create",
@@ -1137,7 +1066,7 @@ const handler = createMcpHandler((server) => {
             prompt,
             lyrics,
             batch_size: 1,
-            title: "小手机翻唱歌曲",
+            title: customTitle, // 自动命名生效
           }
         );
 
@@ -1155,10 +1084,11 @@ const handler = createMcpHandler((server) => {
             type: "text",
             text: JSON.stringify({
               success: true,
-              message: "翻唱任务提交成功！",
+              message: `翻唱任务提交成功！已自动命名为：${customTitle}`,
               task_id: String(task_id),
               song_id: song_id ? String(song_id) : null,
               character,
+              title: customTitle,
               voice_id: selectedVoiceId,
               source_item_id,
             }, null, 2),
@@ -1290,6 +1220,42 @@ const handler = createMcpHandler((server) => {
       } catch (error) {
         return errorResult(error);
       }
+    }
+  );
+
+  // 9. 根据指定的性别分发锁死节奏的黄金 Prompt (新加功能)
+  server.registerTool(
+    "get_prompt_by_gender",
+    {
+      title: "根据指定性别分发黄金Prompt",
+      description: "根据用户指定的歌手性别（男/女），精准分发锁定节奏、防止乱改BPM的专属 Prompt。",
+      inputSchema: z.object({
+        gender: z.enum(["male", "female"]).describe("male代表男声原调，female代表女声降调7个半音"),
+        song_name: z.string().min(1),
+      }),
+    },
+    async ({ gender, song_name }) => {
+      // 男声原调锁死节奏 Prompt
+      const malePrompt = "原样翻唱，必须完美保留原曲的节奏速度、BPM、拍号、旋律、和弦及所有段落结构，绝对不允许擅自改变节奏、拖拍或加速减速。原唱为男声，保持原调不变，直接进行声纹替换。温柔青年男声，音色温暖柔和，气声轻唱贴耳近麦，breathy close-miked，咬字连贯legato，情绪克制细腻。前奏间奏尾奏保持纯器乐原样，绝对不要加入人声哼唱呜声或即兴填充。";
+
+      // 女声降调锁死节奏 Prompt
+      const femalePrompt = "原样翻唱，必须完美保留原曲的节奏速度、BPM、拍号、旋律、和弦及所有段落结构，绝对不允许擅自改变节奏、拖拍或加速减速。原唱为女声，必须将整体调性降低7个半音（纯五度）至男声舒适音域演唱，男声自然音域在C2到C4之间，避免高音夹嗓。温柔青年男声，音色温暖柔和，气声轻唱贴耳近麦，breathy close-miked，咬字连贯legato，情绪克制细腻。前奏间奏尾奏保持纯器乐原样，绝对不要加入人声哼唱呜声或即兴填充。";
+
+      const selectedPrompt = gender === "female" ? femalePrompt : malePrompt;
+      const typeDesc = gender === "female" ? "女声 (已应用7个半音降调)" : "男声 (原调换音色)";
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            success: true,
+            song: song_name,
+            gender_selected: typeDesc,
+            prompt: selectedPrompt,
+            message: "已成功获取对应性别的锁死节奏 Prompt！",
+          }, null, 2),
+        }],
+      };
     }
   );
 
